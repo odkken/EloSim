@@ -1,140 +1,150 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using MoreLinq;
+using Moserware.Skills;
 
 namespace ELO
 {
-
-    class Program
+    public class Program
     {
-
         public static bool Parallel = true;
-        public static int PlayersPerTeam = 2;
-        public static int NumConcurrentGames = 50;
-        public static int NumIterations = 20000; //total # games = numConcurrentGames * numIterations
-        public static int GameLength = 100; //
-        public static double StrategyMultiplier = .25;
-        static void Main(string[] args)
+        public enum SkillType
         {
+            TrueSkill,
+            GaussianElo,
+            Ns2
+        }
+        public static SkillType SkillToUse = SkillType.Ns2;
+        public static int PlayersPerTeam = 8;
+        public double PersonalModifier = 0;
+        public double PersonalPower = 0;
+        public static int NumConcurrentGames = 100;
+        public static int NumIterations = 100; //total # games = numConcurrentGames * numIterations
+        public static double StrategyMultiplier = 0;
+        public static int TotalNumPlayers = PlayersPerTeam * 2 * NumConcurrentGames;
+        private static int numRuns;
+        public static List<Point> Simulate(double personalMod, double personalPow, double matchmakingDelta, bool log)
+        {
+            var playersPerGame = PlayersPerTeam * 2;
             var totalNumPlayers = PlayersPerTeam * 2 * NumConcurrentGames;
             var allPlayers = new List<Player>();
             for (int i = 0; i < totalNumPlayers; i++)
             {
-                var player = new Player();
-                player.Initialize();
+                var player = new Player(i) { Skill = Util.GaussianRandom(.5, .15) };
+                player.Rating = new Rating(1500, 7);
                 allPlayers.Add(player);
             }
-
-            //at this point you have a random list of players, each with 1200 elo
             for (int i = 0; i < NumIterations; i++)
             {
-                allPlayers.Shuffle();
                 //have players join games, creating new ones when necessary
-                var games = new List<Game>();
+                allPlayers.Shuffle();
+
+                var fullGames = new List<Game>();
+                var fillingGames = new List<Game>();
+
                 foreach (var player in allPlayers)
                 {
-                    var playerRating = player.Rating;
-                    var gameToJoin =
-                        games.FirstOrDefault(a => a.team1.Count < PlayersPerTeam || a.team2.Count < PlayersPerTeam && Math.Abs(a.AllPlayers.Average(b => b.Rating) - playerRating) < 50);
-                    if (gameToJoin.team1 != null)
+                    if (fillingGames.Count > 0)
                     {
-                        gameToJoin.AddPlayer(player);
-                    }
-                    else
-                    {
-                        if (games.Count < NumConcurrentGames)
+                        Game bestMatchGame = null;
+                        double eloDelta = 9999;
+                        foreach (var game in fillingGames)
                         {
-                            var newGame = new Game
+                            var delta = Math.Abs(game.AverageRating - player.Rating.Mean);
+                            if (delta < eloDelta)
                             {
-                                team1 = new List<Player>(),
-                                team2 = new List<Player>()
-                            };
-                            newGame.AddPlayer(player);
-                            games.Add(newGame);
+                                eloDelta = delta;
+                                bestMatchGame = game;
+                                if (eloDelta < 10)
+                                    break;
+                            }
                         }
-                        else
+                        if (eloDelta < matchmakingDelta)
                         {
-                            var bestMatchGame = games.Where(a => a.team1.Count < PlayersPerTeam || a.team2.Count < PlayersPerTeam).MinBy(a => Math.Abs(a.AllPlayers.Average(b => b.Rating) - playerRating));
+                            // ReSharper disable once PossibleNullReferenceException
                             bestMatchGame.AddPlayer(player);
+                            if (!bestMatchGame.Joinable)
+                            {
+                                fillingGames.Remove(bestMatchGame);
+                                fullGames.Add(bestMatchGame);
+                            }
+                            continue;
                         }
                     }
+                    //if we're here, we need to make a new game
+
+                    var newGame = new Game(personalMod, personalPow);
+                    newGame.AddPlayer(player);
+                    fillingGames.Add(newGame);
                 }
+
+                var gameLength = (int)Math.Pow(2, PlayersPerTeam - 1);
                 if (Parallel)
-                    System.Threading.Tasks.Parallel.ForEach(games, game => game.Run(GameLength));
+                    System.Threading.Tasks.Parallel.ForEach(fullGames, game => game.Run(gameLength));
                 else
-                    foreach (var game in games)
+                    foreach (var game in fullGames)
                     {
-                        game.Run(GameLength);
+                        game.Run(gameLength);
                     }
-
-
             }
-            var linesToWrite = new List<string> { "ELO,Accuracy,Evasiveness,Support,Strategy" };
-            linesToWrite.AddRange(allPlayers.Select(player => player.Rating + ", " + player.Accuracy + ", " + player.Evasiveness + ", " + player.Support + ", " + player.Strategy));
-            File.WriteAllLines(@"c:\temp\elo.csv", linesToWrite);
-
+            var playerPoints = allPlayers.Select(player => new Point { X = player.Skill, Y = player.Rating.Mean }).ToList();
+            if (log)
+            {
+                var linesToWrite = new List<string>(); // { "ELO,Accuracy,Evasiveness,Support,Strategy" };
+                //linesToWrite.AddRange(allPlayers.Select(player => player.Rating + ", " + player.Accuracy + ", " + player.Evasiveness + ", " + player.Support + ", " + player.Strategy));
+                linesToWrite.AddRange(allPlayers.Select(player => player.Skill + "," + player.Rating.Mean));
+                var fileName = @"c:\temp\elo\" + "_" +
+                    NumIterations + "_" +
+                    personalMod + "_" +
+                    personalPow + "_" +
+                    matchmakingDelta + "_" +
+                    ".csv";
+                File.WriteAllLines(fileName, linesToWrite);
+                Process.Start(@"C:\Program Files\Microsoft Office\Office15\EXCEL.EXE", fileName);
+            }
+            return playerPoints;
         }
 
-    }
-
-    public struct Game
-    {
-        public List<Player> team1;
-        public List<Player> team2;
-
-        public IEnumerable<Player> AllPlayers
+        public struct Point
         {
-            get { return team1.Concat(team2); }
+            public double X;
+            public double Y;
         }
 
-        public void AddPlayer(Player player)
+        public static void LeastSquaresFitLinear(List<Point> points, out double m, out double b)
         {
-            player.ClearScore();
-            if (team1.Count > team2.Count)
-                team2.Add(player);
+            //Gives best fit of data to line Y = MC + B  
+            int i;
+
+            var x1 = 0.0;
+            var y1 = 0.0;
+            var xy = 0.0;
+            var x2 = 0.0;
+
+            for (i = 0; i < points.Count; i++)
+            {
+                x1 += points[i].X;
+                y1 += points[i].Y;
+                xy += points[i].X * points[i].Y;
+                x2 += points[i].X * points[i].X;
+            }
+
+            double J = (points.Count * x2) - (x1 * x1);
+            if (J != 0.0)
+            {
+                m = ((points.Count * xy) - (x1 * y1)) / J;
+                b = ((y1 * x2) - (x1 * xy)) / J;
+            }
             else
-                team1.Add(player);
-        }
-
-
-        public void Run(int gameLength)
-        {
-            var team1Support = team1.Average(a => a.Support);
-            var team2Support = team2.Average(a => a.Support);
-            for (int i = 0; i < gameLength; i++)
             {
-                foreach (var player in team1)
-                {
-                    var opposingPlayer = team2[Util.Rng.Next(team2.Count)];
-                    player.Fight(opposingPlayer, team1Support, team2Support);
-                }
-            }
-
-
-            //team elo calc
-
-            var team1Wins = team1.Sum(a => a.kills) * (1 + Program.StrategyMultiplier * team1.Average(a => a.Strategy)) >
-                            team2.Sum(a => a.kills) * (1 + Program.StrategyMultiplier * team2.Average(a => a.Strategy));
-
-            var team1Elo = team1.Average(a => a.Rating);
-            var team2Elo = team2.Average(a => a.Rating);
-
-
-            foreach (var player in team1)
-            {
-                player.UpdateElo(team2Elo, team1Wins);
-            }
-            foreach (var player in team2)
-            {
-                player.UpdateElo(team1Elo, !team1Wins);
+                m = 0;
+                b = 0;
             }
         }
-
-
     }
-
 }
